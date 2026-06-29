@@ -1,0 +1,13 @@
+# IBVS pipeline — pip-installable dependencies
+# Install into the project venv:  python -m pip install -r requirements.txt
+#
+# IMPORTANT: cv2.aruco lives in the *contrib* build. Do NOT also install plain
+# opencv-python in the same environment (the two packages conflict).
+opencv-contrib-python>=4.7
+numpy>=1.21
+pyzmq>=25.0
+
+# ur_rtde is NOT listed here on purpose: it has no Windows wheel and must be
+# compiled from source (needs Visual Studio C++ build tools). It is only needed
+# by the real-robot scripts (test.py, waypoint_test.py, robot_interface.py's
+# RTDEInterface). See README "Real robot (ur_rtde)" for how it's provided.
