@@ -104,9 +104,11 @@ If you ever need a fully isolated build, either:
 
 ## 2-DOF poll-and-follow tracker (`marker_follow.py`)
 
-A simple, safe alternative to continuous IBVS: the robot homes once, then every few
-seconds checks the marker and makes **one discrete 2-DOF `moveL`** in base X/Y to
-re-center on it — only when the marker has actually moved. Runs until `Ctrl-C`.
+A simple, safe alternative to continuous IBVS: the robot homes once, then every cycle
+**chases the marker until it's centered** — while the marker's offset from the image
+center exceeds a tolerance, it makes a 2-DOF `moveL` in base X/Y stepping `gain × offset`
+toward center (a discrete, IBVS-like proportional law). It holds once centered and
+re-chases when the marker moves. Runs until `Ctrl-C`.
 
 ```powershell
 # Terminal A — perception (RealSense, metric depth):
@@ -123,8 +125,9 @@ Bring-up notes:
 - **Run `--dry-run` first.** Move the marker and confirm the printed base `dX,dY`
   direction matches its real-world motion. The camera→base axis signs are **not**
   hand-eye calibrated — fix them in `CAM_TO_BASE` at the top of `marker_follow.py`.
-- Tunables (CLI or constants): `--period` (default 5s), `--deadband` (1 cm),
-  `--vel`/`--acc`, `--home-x/-y/-z`, `--max-cycles` (bounded test runs).
+- Tunables (CLI or constants): `--period`, `--tol` (centered stop band, ~1 cm),
+  `--gain` (λ: fraction of the offset moved per step; <1 = smooth IBVS-like approach,
+  1.0 = one-shot), `--vel`/`--acc`, `--home-x/-y/-z`, `--max-cycles` (bounded test runs).
 - Only base X and Y move; Z and tool orientation are held (that's the "2-DOF").
 
 ## Files

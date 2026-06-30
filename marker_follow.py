@@ -6,9 +6,10 @@ marker_follow.py — 2-DOF poll-and-follow ArUco tracker (discrete moveL).
 A simple, safe alternative to continuous IBVS:
 
   1. On startup, move the UR5e once to a fixed HOME pose (test.py-style moveL).
-  2. Every PERIOD_S seconds, read the marker's metric position from perception.
-  3. If the marker moved more than DEADBAND_M since the last check, make ONE
-     2-DOF moveL in base X/Y to re-center on it. Otherwise, don't move.
+  2. Every PERIOD_S seconds, read the marker's metric offset from the image center.
+  3. While that offset exceeds CENTER_TOL_M, make a 2-DOF moveL in base X/Y that
+     steps GAIN x the offset toward centering it (discrete, IBVS-like proportional
+     control); inside the tolerance it holds, and re-chases when the marker moves.
   4. Run until Ctrl-C.
 
 This is a *position* tracker, not a velocity servo: it does NOT use the IBVS
@@ -19,7 +20,7 @@ Run perception first (separate terminal), then this:
     python perception.py --source realsense --marker-size 0.05 --marker-id 0 \
         --publish zmq --no-show
     python marker_follow.py --ip 192.168.5.5
-    python marker_follow.py --dry-run          # no robot; validate signs/deadband
+    python marker_follow.py --dry-run          # no robot; validate signs/gain/tol
 
 cam->base axis signs are NOT calibrated. Validate with --dry-run, then tune
 CAM_TO_BASE on hardware at low speed (see the README / plan verification steps).
@@ -35,8 +36,9 @@ from stream_subscriber import StreamSubscriber
 
 # --- tunable configuration -------------------------------------------------- #
 HOME_XYZ = (0.40, 0.20, 0.50)     # base-frame metres (test.py center + height)
-PERIOD_S = 1.0                    # seconds between marker checks
-DEADBAND_M = 0.01                 # ignore marker moves smaller than this (~1 cm)
+PERIOD_S = 0.01                    # seconds between marker checks
+CENTER_TOL_M = 0.01               # "centered enough" stop band (~1 cm); no move inside it
+GAIN = 0.5                        # lambda: fraction of the offset moved per step (<1 = IBVS-like)
 MOVE_V = 0.1                     # moveL tool speed [m/s]
 MOVE_A = 0.30                     # moveL tool acceleration [m/s^2]
 FRESH_S = 0.20                    # only trust a perception frame younger than this
@@ -72,7 +74,10 @@ def main():
                     help="perception ZMQ endpoint.")
     ap.add_argument("--topic", default="perception", help="perception ZMQ topic.")
     ap.add_argument("--period", type=float, default=PERIOD_S)
-    ap.add_argument("--deadband", type=float, default=DEADBAND_M)
+    ap.add_argument("--tol", type=float, default=CENTER_TOL_M,
+                    help="centered-enough stop band [m]; no move when offset < tol.")
+    ap.add_argument("--gain", type=float, default=GAIN,
+                    help="fraction of the offset moved per step (the lambda).")
     ap.add_argument("--vel", type=float, default=MOVE_V)
     ap.add_argument("--acc", type=float, default=MOVE_A)
     ap.add_argument("--home-x", type=float, default=HOME_XYZ[0])
@@ -110,7 +115,6 @@ def main():
     else:
         print("[dry-run] no robot connection; printing intended moves only.")
 
-    prev = None
     cycles = 0
     try:
         while args.max_cycles is None or cycles < args.max_cycles:
@@ -121,28 +125,18 @@ def main():
                 print("[check] marker not visible / no depth -> hold.")
                 continue
             mx, my = m
-            if prev is None:
-                prev = m
-                print(f"[check] baseline marker cam-xy = ({mx:+.3f}, {my:+.3f}) m")
-                continue
-
-            moved = float(np.hypot(mx - prev[0], my - prev[1]))
-            dX, dY = (CAM_TO_BASE @ np.array([mx, my])).tolist()
-            if moved > args.deadband:
-                print(f"[move] marker cam-xy=({mx:+.3f},{my:+.3f}) moved {moved*100:.1f}cm "
-                      f"-> base dX={dX:+.3f} dY={dY:+.3f} m")
+            offset = float(np.hypot(mx, my))           # distance from image center = the error
+            dX, dY = (CAM_TO_BASE @ np.array([args.gain * mx, args.gain * my])).tolist()
+            if offset > args.tol:                      # off-center -> step toward center
+                print(f"[move] off-center {offset*100:.1f}cm "
+                      f"(cam-xy={mx:+.3f},{my:+.3f}) -> step base dX={dX:+.3f} dY={dY:+.3f} m")
                 if not args.dry_run:
                     pose = rtde_r.getActualTCPPose()
                     pose[0] += dX
                     pose[1] += dY                      # 2-DOF: only base X,Y change
                     rtde_c.moveL(pose, args.vel, args.acc)
-                    prev = read_marker_xy(sub) or m    # refresh baseline (now ~centered)
-                else:
-                    prev = m
             else:
-                print(f"[hold] marker cam-xy=({mx:+.3f},{my:+.3f}) moved {moved*100:.1f}cm "
-                      f"< deadband -> no move.")
-                prev = m
+                print(f"[hold] centered ({offset*100:.1f}cm < {args.tol*100:.1f}cm) -> no move.")
     except KeyboardInterrupt:
         print("\n[stop] interrupted.")
     finally:
