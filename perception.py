@@ -29,7 +29,7 @@ RUN:
     python perception.py --source 0 --marker-size 0.05 --show
 
     # full 3D pose (recommended): provide intrinsics from calibration
-    python perception_aruco.py --source 0 --marker-size 0.05 \
+    python perception.py --source 0 --marker-size 0.05 \
         --intrinsics cam.json --kalman --show
 
 OUTPUT CONTRACT (one JSON object per frame):
@@ -241,6 +241,70 @@ class CVKalman:
 
 
 # --------------------------------------------------------------------------- #
+# RealSense capture (duck-typed cv2.VideoCapture) for depth-only modules
+# --------------------------------------------------------------------------- #
+class RealSenseCapture:
+    """Feeds the RealSense LEFT-INFRARED stream through a cv2.VideoCapture-like
+    interface (read / isOpened / set / release).
+
+    For depth modules without an RGB sensor (e.g. D430): ArUco detects fine in
+    grayscale IR. The IR projector is disabled so the marker image is clean, and
+    the stream's factory intrinsics are exposed as .K / .dist for PnP pose.
+    """
+    def __init__(self, width=640, height=480, fps=30):
+        import pyrealsense2 as rs
+        self._rs = rs
+        self.pipe = rs.pipeline()
+        cfg = rs.config()
+        cfg.enable_stream(rs.stream.infrared, 1, width, height, rs.format.y8, fps)
+        try:
+            self.profile = self.pipe.start(cfg)
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"RealSense IR start failed at {width}x{height}@{fps}: {e}. "
+                f"Pick a supported IR mode (e.g. 640x480, 848x480, 1280x720).")
+        # kill the IR dot projector -> clean grayscale image for marker detection
+        try:
+            ds = self.profile.get_device().first_depth_sensor()
+            if ds.supports(rs.option.emitter_enabled):
+                ds.set_option(rs.option.emitter_enabled, 0)
+        except Exception:
+            pass
+        vsp = self.profile.get_stream(rs.stream.infrared, 1).as_video_stream_profile()
+        intr = vsp.get_intrinsics()
+        self.K = np.array([[intr.fx, 0, intr.ppx],
+                           [0, intr.fy, intr.ppy],
+                           [0, 0, 1]], dtype=float)
+        self.dist = np.array(intr.coeffs, dtype=float)
+        self.width, self.height = intr.width, intr.height
+        self._opened = True
+
+    def isOpened(self):
+        return self._opened
+
+    def set(self, *args, **kwargs):
+        return False                      # resolution is fixed at stream start
+
+    def read(self):
+        try:
+            frames = self.pipe.wait_for_frames(2000)
+            ir = frames.get_infrared_frame(1)
+            if not ir:
+                return False, None
+            img = np.asanyarray(ir.get_data())             # HxW uint8 grayscale
+            return True, cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        except Exception:
+            return False, None
+
+    def release(self):
+        self._opened = False
+        try:
+            self.pipe.stop()
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------- #
 # Main node
 # --------------------------------------------------------------------------- #
 class PerceptionNode:
@@ -250,23 +314,46 @@ class PerceptionNode:
         self.target_id = args.marker_id   # None = any / closest to center
 
         src = args.source
-        try:
-            src = int(src)
-        except ValueError:
-            pass
-        self.cap = cv2.VideoCapture(src)
+        self._is_realsense = isinstance(src, str) and src.lower() == "realsense"
+        if self._is_realsense:
+            self.cap = RealSenseCapture(args.width or 640, args.height or 480, args.fps)
+            log.info("RealSense left-IR stream (depth module / no RGB).")
+        else:
+            try:
+                src = int(src)
+            except ValueError:
+                pass
+            self.cap = cv2.VideoCapture(src)
         if not self.cap.isOpened():
             raise RuntimeError(f"Cannot open source '{args.source}'.")
+        if not self._is_realsense:
+            if args.width:
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+            if args.height:
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
         ok, frame = self.cap.read()
         if not ok:
             raise RuntimeError("Source opened but returned no frame.")
         self.height, self.width = frame.shape[:2]
         self._first_frame = frame
         log.info("Source open: %dx%d", self.width, self.height)
+        if not self._is_realsense and ((args.width and args.width != self.width) or
+                                       (args.height and args.height != self.height)):
+            log.warning("Requested %sx%s but camera gave %dx%d -- intrinsics MUST "
+                        "match the ACTUAL size above, or pose/depth will be wrong.",
+                        args.width, args.height, self.width, self.height)
 
         if args.intrinsics:
             self.intr = Intrinsics.load(args.intrinsics, self.width, self.height)
             log.info("Loaded intrinsics from %s (3D pose enabled)", args.intrinsics)
+        elif self._is_realsense:
+            self.intr = Intrinsics(K=self.cap.K, dist=self.cap.dist,
+                                   cx=float(self.cap.K[0, 2]),
+                                   cy=float(self.cap.K[1, 2]), calibrated=True)
+            log.info("RealSense factory IR intrinsics (3D pose enabled): "
+                     "fx=%.1f fy=%.1f cx=%.1f cy=%.1f",
+                     self.cap.K[0, 0], self.cap.K[1, 1],
+                     self.cap.K[0, 2], self.cap.K[1, 2])
         else:
             self.intr = Intrinsics.default(self.width, self.height)
             log.warning("No --intrinsics: 2D center + marker id only, NO 3D pose. "
@@ -435,7 +522,18 @@ class PerceptionNode:
 
 def parse_args():
     p = argparse.ArgumentParser(description="Eye-in-hand ArUco perception for UR5e.")
-    p.add_argument("--source", default="0", help="Webcam index or video/image path.")
+    p.add_argument("--source", default="0",
+                   help="Webcam index, video/image path, or 'realsense' for the "
+                        "Intel RealSense left-IR stream (depth modules w/o RGB).")
+    p.add_argument("--width", type=int, default=None,
+                   help="Request capture width. MUST match the resolution the "
+                        "--intrinsics file was generated at (see realsense_setup.py). "
+                        "For --source realsense this picks the IR mode (default 640).")
+    p.add_argument("--height", type=int, default=None,
+                   help="Request capture height. MUST match the --intrinsics resolution. "
+                        "For --source realsense this picks the IR mode (default 480).")
+    p.add_argument("--fps", type=int, default=30,
+                   help="Requested capture FPS (used by --source realsense).")
     p.add_argument("--dict", default="4X4_50", choices=list(DICT_MAP),
                    help="ArUco dictionary the marker belongs to.")
     p.add_argument("--marker-size", type=float, default=0.05,

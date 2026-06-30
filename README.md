@@ -50,11 +50,35 @@ Always run with the venv **activated** (so `python` = `.venv\Scripts\python.exe`
 **Simulated / no robot (mock backend):**
 ```powershell
 # Terminal A — perception (publishes target state over ZMQ):
+#   Intel RealSense depth module (D430 etc., no RGB) — uses left-IR + factory intrinsics:
+python perception.py --source realsense --marker-size 0.05 --marker-id 0 --kalman --publish zmq --no-show
+#   ...or a plain color webcam (needs an intrinsics file):
 python perception.py --source 0 --marker-size 0.05 --intrinsics cam.json --marker-id 0 --kalman --publish zmq --no-show
 
 # Terminal B — control loop with the mock robot (default):
 python main.py
 ```
+
+## Intel RealSense (depth module, e.g. D430 — no RGB)
+
+This camera has no color sensor, so perception uses its **left-infrared** stream
+(ArUco detects fine in grayscale IR) and reads the device's **factory intrinsics**
+automatically — no `cam.json`, no checkerboard calibration:
+
+```powershell
+python realsense_setup.py --list        # confirm the device is detected
+python perception.py --source realsense --marker-size <marker_side_m> --publish zmq --no-show
+```
+
+Notes:
+- Default IR mode is 640x480; change with `--width/--height/--fps` (must be a supported
+  IR mode, e.g. 640x480, 848x480, 1280x720).
+- The IR dot projector is disabled automatically so the marker image is clean. If the
+  room is too dark for IR, add ambient light (the left IR imager needs to see the marker).
+- Print a **4X4_50** ArUco marker (the default `--dict`) and pass its real side length
+  in metres via `--marker-size`.
+- `realsense_setup.py` is only needed for the *webcam* path (to make a `cam.json`); the
+  `--source realsense` path doesn't use it.
 
 **Real UR5e / URSim:**
 ```powershell

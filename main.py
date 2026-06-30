@@ -35,6 +35,7 @@ cam.json intrinsics MUST equal K below, or normalized coords / depth disagree.
 """
 from __future__ import annotations
 import argparse
+import time
 import numpy as np
 
 from stream_subscriber import StreamSubscriber, FileSubscriber
@@ -82,6 +83,11 @@ def main():
     ap.add_argument("--lost-ms", type=float, default=400.0)
     ap.add_argument("--conv-tol", type=float, default=0.02)
     ap.add_argument("--max-ticks", type=int, default=None)
+    ap.add_argument("--settle", type=float, default=5.0,
+                    help="seconds to move the marker before servoing starts")
+    ap.add_argument("--track", action="store_true",
+                    help="live-tracking mode: hold the marker at the taught relative "
+                         "pose and follow it continuously (never stop on convergence)")
     args = ap.parse_args()
 
     # transport (perception -> controller)
@@ -104,18 +110,41 @@ def main():
         conv_tol=args.conv_tol)
 
     try:
-        print("[teach] hold the marker at the desired pose...")
+        if args.track:
+            print("[teach] hold the marker at the desired RELATIVE pose to keep "
+                  "(e.g. centered at the working distance)...")
+        else:
+            print("[teach] hold the marker at the desired goal pose...")
         ok, Zstar = loop.teach_goal(timeout_s=30.0)
         if not ok:
             print("[teach] no valid target frame; is perception publishing?")
             return
         print(f"[teach] goal captured (Z*={Zstar:.3f} m)")
 
-        print(f"[servo] running at {args.rate:.0f} Hz. Ctrl-C to stop.")
-        
-        # input("[teach] goal set. MOVE the marker, then press Enter to start servoing...")
-        result = loop.run(max_ticks=args.max_ticks)
-        print(f"[servo] stopped: {result}")
+        # Hands-free settle window (no keypress; works without a live stdin).
+        if args.settle > 0:
+            if args.track:
+                msg = (f"[teach] keep the marker steady — tracking starts in "
+                       f"{args.settle:.0f}s (Ctrl-C to abort)...")
+            else:
+                msg = (f"[teach] goal set. MOVE the marker now — servoing starts "
+                       f"in {args.settle:.0f}s (Ctrl-C to abort)...")
+            print(msg)
+            t_end = time.monotonic() + args.settle
+            while time.monotonic() < t_end:
+                print(f"  starting in {t_end - time.monotonic():4.1f}s ...",
+                      end="\r", flush=True)
+                time.sleep(0.1)
+            print()
+
+        if args.track:
+            print(f"[track] following marker at {args.rate:.0f} Hz. Move it around; "
+                  "the arm holds it at the taught pose. Ctrl-C to stop.")
+            result = loop.run(max_ticks=args.max_ticks, stop_on_converge=False)
+        else:
+            print(f"[servo] running at {args.rate:.0f} Hz. Ctrl-C to stop.")
+            result = loop.run(max_ticks=args.max_ticks)
+        print(f"[done] {result}")
         print(f"[stats] {loop.stats}")
     finally:
         robot.close()
