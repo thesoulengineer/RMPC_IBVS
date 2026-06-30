@@ -102,6 +102,31 @@ If you ever need a fully isolated build, either:
 - `conda install -c conda-forge ur_rtde` (prebuilt Windows binary), or
 - install Visual Studio C++ Build Tools + CMake, then `pip install ur_rtde`.
 
+## 2-DOF poll-and-follow tracker (`marker_follow.py`)
+
+A simple, safe alternative to continuous IBVS: the robot homes once, then every few
+seconds checks the marker and makes **one discrete 2-DOF `moveL`** in base X/Y to
+re-center on it — only when the marker has actually moved. Runs until `Ctrl-C`.
+
+```powershell
+# Terminal A — perception (RealSense, metric depth):
+python perception.py --source realsense --marker-size 0.05 --marker-id 0 --publish zmq --no-show
+
+# Terminal B — validate WITHOUT the robot first (prints intended moves, no motion):
+python marker_follow.py --dry-run
+
+# Terminal B — on hardware (e-stop in hand, low speed):
+python marker_follow.py --ip 192.168.5.5
+```
+
+Bring-up notes:
+- **Run `--dry-run` first.** Move the marker and confirm the printed base `dX,dY`
+  direction matches its real-world motion. The camera→base axis signs are **not**
+  hand-eye calibrated — fix them in `CAM_TO_BASE` at the top of `marker_follow.py`.
+- Tunables (CLI or constants): `--period` (default 5s), `--deadband` (1 cm),
+  `--vel`/`--acc`, `--home-x/-y/-z`, `--max-cycles` (bounded test runs).
+- Only base X and Y move; Z and tool orientation are held (that's the "2-DOF").
+
 ## Files
 
 | File | Role |
@@ -115,5 +140,8 @@ If you ever need a fully isolated build, either:
 | `control_loop.py` | Fixed-rate scheduler + state machine |
 | `robot_interface.py` | `RTDEInterface` (real) and `MockInterface` (no robot) |
 | `schema.py` | `TargetState` data schema |
+| `marker_follow.py` | 2-DOF poll-and-follow tracker (discrete `moveL`, standalone) |
+| `realsense_setup.py` | RealSense helper: list devices, dump factory intrinsics → `cam.json` |
+| `pose_tap.py` | Diagnostic: prints what perception publishes (pose/depth/calibrated) |
 | `test.py`, `waypoint_test.py` | Standalone UR5e motion scripts (RTDE) |
 | `cam.json` | Camera intrinsics (must match `K` in `main.py`) |
