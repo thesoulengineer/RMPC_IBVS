@@ -118,13 +118,18 @@ python perception.py --source realsense --marker-size 0.05 --marker-id 0 --publi
 python marker_follow.py --dry-run
 
 # Terminal B — on hardware (e-stop in hand, low speed):
-python marker_follow.py --ip 192.168.5.5
+python marker_follow.py --ip 192.168.5.5                 # discrete moveL steps (default)
+python marker_follow.py --ip 192.168.5.5 --continuous    # smooth speedL velocity servo
 ```
 
 Bring-up notes:
 - **Run `--dry-run` first.** Move the marker and confirm the printed base `dX,dY`
   direction matches its real-world motion. The camera→base axis signs are **not**
   hand-eye calibrated — fix them in `CAM_TO_BASE` at the top of `marker_follow.py`.
+- **Two modes:** default is discrete `moveL` steps; `--continuous` streams `speedL` velocity
+  (`v = --vel-gain × offset`, capped at `--vel`) at `--rate` Hz for smooth tracking. Validate
+  signs with `--continuous --dry-run` first — continuous never pauses, so a wrong `CAM_TO_BASE`
+  sign runs away *continuously* (the discrete mode only nudges once per cycle).
 - Tunables (CLI or constants): `--period`, `--tol` (centered stop band, ~1 cm),
   `--gain` (λ: fraction of the offset moved per step; <1 = smooth IBVS-like approach,
   1.0 = one-shot), `--vel`/`--acc`, `--home-x/-y/-z`, `--max-cycles` (bounded test runs).
